@@ -1,16 +1,11 @@
 #pragma once
 
 #include <xmmintrin.h>
-
+#include <cstdint>
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cassert>
-#include <chrono>
-#include <cstdint>
-#include <iostream>
 #include <memory>
-#include <vector>
 
 #define USE_VARIANCE true
 
@@ -21,7 +16,7 @@ struct aabb {
     __m128 max;
 };
 
-auto vectorise(std::array<float, 3> min, std::array<float, 3> max) noexcept
+auto vectorise(float min[3], float max[3]) noexcept
 {
     float min_buffer[4] = { min[0], min[1], min[2], 0.0f };
     float max_buffer[4] = { max[0], max[1], max[2], 0.0f };
@@ -31,7 +26,7 @@ auto vectorise(std::array<float, 3> min, std::array<float, 3> max) noexcept
     };
 }
 
-auto vectorise(std::array<float, 3> min, std::array<float, 3> max,
+auto vectorise(float min[3], float max[3],
     uint64_t data) noexcept
 {
     const auto data_lower_32 = std::bit_cast<float>(static_cast<uint32_t>(data & 0xFFFFFFFF));
