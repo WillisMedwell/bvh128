@@ -17,8 +17,11 @@ file(DOWNLOAD ${Catch2_URL} "${Catch2_Download_Dir}/${Catch2_Header}"
     TIMEOUT 60 
     TLS_VERIFY ON
 )
-
 add_executable(test "${CMAKE_CURRENT_SOURCE_DIR}/test.cpp")
 
-target_include_directories(test PRIVATE "${CMAKE_BINARY_DIR}/_deps/")
-target_include_directories(test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_include_directories(
+    test 
+    PRIVATE 
+    "${CMAKE_BINARY_DIR}/_deps/" 
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include"
+)

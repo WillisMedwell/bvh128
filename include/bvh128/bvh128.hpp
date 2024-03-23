@@ -1,22 +1,34 @@
 #pragma once
 
-#include <xmmintrin.h>
-#include <cstdint>
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdint>
 #include <memory>
+#include <xmmintrin.h>
 
 #define USE_VARIANCE true
 
-namespace bvh::simd {
+namespace bvh128::details {
 
 struct aabb {
     __m128 min;
     __m128 max;
 };
 
-auto vectorise(float min[3], float max[3]) noexcept
+template <typename T>
+concept Array3 = requires(const T t) {
+    {
+        t[0]
+    } -> std::same_as<const float&>;
+    {
+        t[1]
+    } -> std::same_as<const float&>;
+    {
+        t[2]
+    } -> std::same_as<const float&>;
+};
+auto vectorise(const Array3 auto& min, const Array3 auto& max) noexcept
 {
     float min_buffer[4] = { min[0], min[1], min[2], 0.0f };
     float max_buffer[4] = { max[0], max[1], max[2], 0.0f };
@@ -25,9 +37,16 @@ auto vectorise(float min[3], float max[3]) noexcept
         .max = _mm_loadu_ps(max_buffer),
     };
 }
-
-auto vectorise(float min[3], float max[3],
-    uint64_t data) noexcept
+auto vectorise(const std::array<float, 3> min, const std::array<float, 3> max) noexcept
+{
+    float min_buffer[4] = { min[0], min[1], min[2], 0.0f };
+    float max_buffer[4] = { max[0], max[1], max[2], 0.0f };
+    return aabb {
+        .min = _mm_loadu_ps(min_buffer),
+        .max = _mm_loadu_ps(max_buffer),
+    };
+}
+auto vectorise(const std::array<float, 3> min, const std::array<float, 3> max, uint64_t data) noexcept
 {
     const auto data_lower_32 = std::bit_cast<float>(static_cast<uint32_t>(data & 0xFFFFFFFF));
     const auto data_upper_32 = std::bit_cast<float>(static_cast<uint32_t>((data >> 32) & 0xFFFFFFFF));
@@ -41,7 +60,7 @@ auto vectorise(float min[3], float max[3],
     };
 }
 
-auto devectorise(const simd::aabb& a) noexcept
+auto devectorise(const aabb& a) noexcept
 {
     float min_buffer[4];
     float max_buffer[4];
@@ -53,12 +72,14 @@ auto devectorise(const simd::aabb& a) noexcept
     auto data_upper_32 = static_cast<uint64_t>(std::bit_cast<uint32_t>(max_buffer[3])) << 32;
     auto data = data_lower_32 | data_upper_32;
 
-    return std::tuple { std::array { min_buffer[0], min_buffer[1], min_buffer[2] },
+    return std::tuple {
         std::array { min_buffer[0], min_buffer[1], min_buffer[2] },
-        data };
+        std::array { max_buffer[0], max_buffer[1], max_buffer[2] },
+        data,
+    };
 }
 
-auto does_intersect(const simd::aabb& lhs, const simd::aabb& rhs) noexcept
+auto does_intersect(const details::aabb& lhs, const details::aabb& rhs) noexcept
 {
     auto lhs_greater = _mm_cmple_ps(lhs.min, rhs.max);
     auto rhs_greater = _mm_cmple_ps(rhs.min, lhs.max);
@@ -67,7 +88,7 @@ auto does_intersect(const simd::aabb& lhs, const simd::aabb& rhs) noexcept
     return (mask & 0b0111) == 0b0111;
 }
 
-auto does_intersect(const simd::aabb& lhs, const __m128& rhs) noexcept
+auto does_intersect(const details::aabb& lhs, const __m128& rhs) noexcept
 {
     auto lhs_greater = _mm_cmple_ps(lhs.min, rhs);
     auto rhs_greater = _mm_cmple_ps(rhs, lhs.max);
@@ -76,7 +97,7 @@ auto does_intersect(const simd::aabb& lhs, const __m128& rhs) noexcept
     return (mask & 0b0111) == 0b0111;
 }
 
-auto has_equal_minmax(const simd::aabb& lhs, const simd::aabb& rhs) noexcept
+auto has_equal_minmax(const details::aabb& lhs, const details::aabb& rhs) noexcept
 {
     auto min_eq = _mm_cmplt_ps(lhs.min, rhs.max);
     auto max_eq = _mm_cmplt_ps(rhs.min, lhs.max);
@@ -85,8 +106,8 @@ auto has_equal_minmax(const simd::aabb& lhs, const simd::aabb& rhs) noexcept
     return (mask & 0b0111) == 0b0111;
 }
 
-auto has_equal_minmax_data(const simd::aabb& lhs,
-    const simd::aabb& rhs) noexcept
+auto has_equal_minmax_data(const details::aabb& lhs,
+    const details::aabb& rhs) noexcept
 {
     auto min_eq = _mm_cmplt_ps(lhs.min, rhs.max);
     auto max_eq = _mm_cmplt_ps(rhs.min, lhs.max);
@@ -95,18 +116,18 @@ auto has_equal_minmax_data(const simd::aabb& lhs,
     return mask == 0b1111;
 }
 
-auto calc_middle(const simd::aabb& a) noexcept
+auto calc_middle(const details::aabb& a) noexcept
 {
     const auto diff_halved = _mm_div_ps(_mm_sub_ps(a.max, a.min), _mm_set_ps1(2.0f));
     return _mm_add_ps(a.min, diff_halved);
 }
 
-auto calc_bounding_volume_mean(const simd::aabb* aabb_begin, uint32_t aabb_sz)
+auto calc_bounding_volume_mean(const details::aabb* aabb_begin, uint32_t aabb_sz)
 {
     const auto aabb_end = aabb_begin + aabb_sz;
 
     // calc bounding volume and mean
-    simd::aabb bounding_volume = *aabb_begin;
+    details::aabb bounding_volume = *aabb_begin;
     auto mean = calc_middle(*aabb_begin);
 
     for (auto iter = aabb_begin + 1; iter != aabb_end; ++iter) {
@@ -119,12 +140,12 @@ auto calc_bounding_volume_mean(const simd::aabb* aabb_begin, uint32_t aabb_sz)
     return std::tuple { bounding_volume, mean };
 }
 
-auto calc_bounding_volume_mean_variance(const simd::aabb* aabb_begin,
+auto calc_bounding_volume_mean_variance(const details::aabb* aabb_begin,
     uint32_t aabb_sz)
 {
     const auto aabb_end = aabb_begin + aabb_sz;
     // calc bounding volume and mean
-    simd::aabb bounding_volume = *aabb_begin;
+    details::aabb bounding_volume = *aabb_begin;
     auto mean = calc_middle(*aabb_begin);
 
     for (auto iter = aabb_begin + 1; iter != aabb_end; ++iter) {
@@ -177,7 +198,7 @@ auto replace_value_at_index(const __m128& dest, const __m128& src,
     return result;
 }
 
-auto split(simd::aabb* aabb_begin, uint32_t aabb_sz) noexcept
+auto split(details::aabb* aabb_begin, uint32_t aabb_sz) noexcept
 {
     // 2n operation
 #if USE_VARIANCE
@@ -191,17 +212,17 @@ auto split(simd::aabb* aabb_begin, uint32_t aabb_sz) noexcept
     auto [min_i, mid_i, max_i] = branchless_minmidmax_indices(reinterpret_cast<const float*>(&length));
 #endif
 
-    auto partition_volume = simd::aabb {
+    auto partition_volume = details::aabb {
         bv.min,
         replace_value_at_index(bv.max, mean, max_i),
     };
 
     auto aabb_end = aabb_begin + aabb_sz;
-    auto aabb_mid = std::partition(aabb_begin, aabb_end, [&](const simd::aabb& aabb) {
+    auto aabb_mid = std::partition(aabb_begin, aabb_end, [&](const details::aabb& aabb) {
         return does_intersect(partition_volume, calc_middle(aabb));
     });
 
-    simd::aabb* adjusted_aabb_mid[2] = {
+    details::aabb* adjusted_aabb_mid[2] = {
         aabb_mid,
         aabb_mid - 1,
     };
@@ -212,11 +233,11 @@ auto split(simd::aabb* aabb_begin, uint32_t aabb_sz) noexcept
 
 } // namespace bvh::simd
 
-namespace bvh {
+namespace bvh128 {
 
 class tree {
     struct unexpanded {
-        bvh::simd::aabb* aabbs_begin;
+        bvh128::details::aabb* aabbs_begin;
         uint32_t aabbs_sz;
     };
     struct branch {
@@ -232,13 +253,13 @@ class tree {
         leaf = 2,
     };
     struct node {
-        bvh::simd::aabb aabb;
+        bvh128::details::aabb aabb;
         stored s;
         stored_id s_id;
     };
     struct M {
         std::unique_ptr<uint32_t[]> iteration_buffer;
-        std::unique_ptr<simd::aabb[]> aabbs;
+        std::unique_ptr<bvh128::details::aabb[]> aabbs;
         std::unique_ptr<node[]> nodes;
         uint32_t nodes_sz;
         uint32_t aabbs_sz;
@@ -279,7 +300,7 @@ class tree {
     }
 
 public:
-    static auto create(std::unique_ptr<simd::aabb[]>&& aabbs,
+    static auto create(std::unique_ptr<bvh128::details::aabb[]>&& aabbs,
         uint32_t aabbs_sz)
     {
         const size_t max_nodes = static_cast<size_t>(aabbs_sz) * 2 - 1;
@@ -301,7 +322,7 @@ public:
     }
 
     template <typename Pred>
-    auto for_each_intersection(simd::aabb aabb, Pred pred)
+    auto foreach_intersection(bvh128::details::aabb aabb, Pred pred)
     {
         uint32_t* queue = _m.iteration_buffer.get();
         queue[0] = 0;
@@ -315,7 +336,7 @@ public:
             if (node.s_id == stored_id::unexpanded) {
                 expand(node, nodes);
             }
-            if (simd::does_intersect(node.aabb, aabb)) {
+            if (details::does_intersect(node.aabb, aabb)) {
                 if (node.s_id == stored_id::branch) {
                     queue[queue_sz++] = node.s.b.first;
                     queue[queue_sz++] = node.s.b.first + 1;
@@ -327,7 +348,7 @@ public:
     }
 
     template <typename Pred>
-    auto for_each_intersection_simd(simd::aabb aabb, Pred pred)
+    auto foreach_intersection_linear(bvh128::details::aabb aabb, Pred pred)
     {
         auto begin = _m.aabbs.get();
         auto end = begin + _m.aabbs_sz;
