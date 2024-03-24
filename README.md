@@ -2,18 +2,24 @@
 A C++20 bounding-volume-heirarchy optimised with 128bit simd operations.
 
 ## Header Only & Light Weight
-Using CMake you can simply download it _(this method means you dont need to compile it, unlike the fetch content module)._
-```cmake
-file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps/bvh128")
-file(DOWNLOAD 
-    "https://github.com/WillisMedwell/bvh128/releases/download/v0.1/bvh128.hpp"
-    "${CMAKE_BINARY_DIR}/_deps/bvh128/bvh128.hpp"
-    EXPECTED_HASH SHA256=e471cb629df17cbbfe405a8f42fd3f1cc1c8afc3c5b2debe699a144d084e82df
-    TIMEOUT 5 TLS_VERIFY ON
-)
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_BINARY_DIR}/_deps/")
-```
 
+<details><summary><b>Adding to your Project</b></summary>
+
+- Using CMake you can simply download it 
+    _(this method means you dont need to compile it, unlike the fetch content module)._
+    ```cmake
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps/bvh128")
+    file(DOWNLOAD 
+        "https://github.com/WillisMedwell/bvh128/releases/download/v0.1/bvh128.hpp"
+        "${CMAKE_BINARY_DIR}/_deps/bvh128/bvh128.hpp"
+        EXPECTED_HASH SHA256=e471cb629df17cbbfe405a8f42fd3f1cc1c8afc3c5b2debe699a144d084e82df
+        TIMEOUT 5 TLS_VERIFY ON
+    )
+    target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_BINARY_DIR}/_deps/")
+    ```
+- Alternatively, just copy the header and add it to your include path!
+
+</details>
 
 <details><summary><b>Performance Review</b></summary>
 
@@ -44,7 +50,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_BINARY_DIR}/_d
 
 ### Building Tests
 - To build, run these commands after downloading the repo.
-- Uses Catch2 for testing _(no need to install it; cmake will download it and verify the hash)._
+
 ```cmd
 cd bvh128
 mkdir build
