@@ -5,13 +5,180 @@
 #include <bit>
 #include <cstdint>
 #include <memory>
+#include <vector>
 #include <xmmintrin.h>
 
 #define USE_VARIANCE true
 
-namespace bvh128::details {
+namespace bvh12 {
 
 struct aabb {
+    std::array<float, 3> min;
+    std::array<float, 3> max;
+    uint64_t data;
+};
+
+class alignas(16) aabb128 {
+    struct M {
+        __m128 min;
+        __m128 max;
+    } _m;
+
+    explicit aabb128(M&& m);
+
+public:
+    aabb128() = default;
+
+    static aabb128 construct(const aabb other) noexcept;
+    static aabb128 construct(const std::array<float, 3>& min, const std::array<float, 3>& max, uint64_t data) noexcept;
+
+    [[nodiscard]] aabb deconstruct() const noexcept;
+
+    [[nodiscard]] bool does_intersect(const aabb128& other) const noexcept;
+    [[nodiscard]] bool does_point_intersect(const __m128& point) const noexcept;
+
+    bool operator==(const aabb128&) = delete;
+    bool operator==(const aabb128&) const = delete;
+    [[nodiscard]] bool is_equal_region(const aabb128& other) const noexcept;
+    [[nodiscard]] bool is_equal_region_and_data(const aabb128& other) const noexcept;
+
+    [[nodiscard]] __m128 calc_middle() const noexcept;
+};
+
+template <typename AllocatorU32 = std::allocator<uint32_t>>
+class tree {
+
+    enum class node_variant : uint32_t {
+        unexpanded,
+        branch,
+        leaf
+    };
+    struct node {
+        aabb128 bounding_volume;
+        aabb128* aabbs_begin;
+        uint32_t aabbs_sz;
+        node_variant node_type;
+    };
+
+    struct M {
+        std::unique_ptr<uint32_t[]> iter_buffer;
+        std::unique_ptr<aabb128[]> aabb128s;
+        std::unique_ptr<node[]> nodes;
+    } _m;
+
+    explicit tree(M&& m);
+
+public:
+    tree() = default;
+
+    [[nodiscard]] static tree construct(const std::vector<aabb>& aabbs);
+
+    template <typename Pred>
+    void for_each_intersection(aabb aabb, Pred pred) const noexcept;
+};
+
+template <typename AllocatorU32>
+tree::tree(M&& m)
+    : _m(std::move(m))
+{
+}
+
+tree tree::construct(const std::vector<aabb>& aabbs)
+{
+    const size_t max_nodes = aabbs.size() * 2 - 1;
+
+    auto iter = std::make_unique_for_overwrite<uint32_t[]>(max_nodes);
+
+    return tree(M {
+        .index_buffer = std::make_unique_for_overwrite<uint32_t[]>(max_nodes),
+        .aabb128s = aabb128s,
+        .nodes = nodes,
+    });
+}
+
+aabb128::aabb128(M&& m)
+    : _m(std::move(m))
+{
+}
+
+aabb128 aabb128::construct(const aabb other) noexcept
+{
+    return construct(other.min, other.max, other.data);
+}
+aabb128 aabb128::construct(const std::array<float, 3>& min, const std::array<float, 3>& max, uint64_t data) noexcept
+{
+    const uint32_t data_lower_32 = static_cast<uint32_t>(data & 0xFFFFFFFF);
+    const uint32_t data_upper_32 = static_cast<uint32_t>((data >> 32) & 0xFFFFFFFF);
+
+    alignas(16) auto min_buffer = std::to_array({ min[0], min[1], min[2], std::bit_cast<float>(data_lower_32) });
+    alignas(16) auto max_buffer = std::to_array({ max[0], max[1], max[2], std::bit_cast<float>(data_upper_32) });
+
+    return aabb128(M {
+        .min = _mm_load_ps(min_buffer.data()),
+        .max = _mm_load_ps(max_buffer.data()),
+    });
+}
+
+aabb aabb128::deconstruct() const noexcept
+{
+    static_assert(sizeof(*this) == sizeof(std::array<float, 8>));
+    const auto& view_of_self = *reinterpret_cast<const std::array<float, 8>*>(this);
+
+    const auto data_lower_32 = static_cast<uint64_t>(std::bit_cast<uint32_t>(view_of_self[3]));
+    const auto data_upper_32 = static_cast<uint64_t>(std::bit_cast<uint32_t>(view_of_self[7])) << 32;
+
+    return aabb {
+        .min = { view_of_self[0], view_of_self[1], view_of_self[2] },
+        .max = { view_of_self[4], view_of_self[5], view_of_self[6] },
+        .data = data_lower_32 | data_upper_32,
+    };
+}
+
+bool aabb128::does_intersect(const aabb128& other) const noexcept
+{
+    auto this_max_greater = _mm_cmple_ps(other._m.min, _m.max);
+    auto other_max_greater = _mm_cmple_ps(_m.min, other._m.max);
+    auto both_greater = _mm_and_ps(this_max_greater, other_max_greater);
+    auto mask = _mm_movemask_ps(both_greater);
+    return (mask & 0b0111) == 0b0111;
+}
+bool aabb128::does_point_intersect(const __m128& point) const noexcept
+{
+    auto point_greater_than_min = _mm_cmple_ps(_m.min, point);
+    auto max_greater_than_point = _mm_cmple_ps(point, _m.max);
+    auto both_greater = _mm_and_ps(point_greater_than_min, max_greater_than_point);
+    auto mask = _mm_movemask_ps(both_greater);
+    return (mask & 0b0111) == 0b0111;
+}
+
+bool aabb128::is_equal_region(const aabb128& other) const noexcept
+{
+    auto max_eq = _mm_cmpeq_ps(_m.min, other._m.max);
+    auto min_eq = _mm_cmpeq_ps(other._m.min, _m.max);
+    auto both_eq = _mm_and_ps(max_eq, min_eq);
+    auto mask = _mm_movemask_ps(both_eq);
+    return (mask & 0b0111) == 0b0111;
+}
+bool aabb128::is_equal_region_and_data(const aabb128& other) const noexcept
+{
+    auto max_eq = _mm_cmpeq_ps(_m.min, other._m.max);
+    auto min_eq = _mm_cmpeq_ps(other._m.min, _m.max);
+    auto both_eq = _mm_and_ps(max_eq, min_eq);
+    auto mask = _mm_movemask_ps(both_eq);
+    return mask == 0b1111;
+}
+
+__m128 aabb128::calc_middle() const noexcept
+{
+    const auto difference_halved = _mm_div_ps(_mm_sub_ps(_m.max, _m.min), _mm_set_ps1(2.0f));
+    return _mm_add_ps(_m.min, difference_halved);
+}
+
+}
+
+namespace bvh128::details {
+
+struct alignas(16) aabb {
     __m128 min;
     __m128 max;
 };
@@ -28,42 +195,42 @@ concept Array3 = requires(const T t) {
         t[2]
     } -> std::same_as<const float&>;
 };
-auto vectorise(const Array3 auto& min, const Array3 auto& max) noexcept
+inline auto vectorise(const Array3 auto& min, const Array3 auto& max) noexcept
 {
-    float min_buffer[4] = { min[0], min[1], min[2], 0.0f };
-    float max_buffer[4] = { max[0], max[1], max[2], 0.0f };
+    alignas(16) float min_buffer[4] = { min[0], min[1], min[2], 0.0f };
+    alignas(16) float max_buffer[4] = { max[0], max[1], max[2], 0.0f };
     return aabb {
-        .min = _mm_loadu_ps(min_buffer),
-        .max = _mm_loadu_ps(max_buffer),
+        .min = _mm_load_ps(min_buffer),
+        .max = _mm_load_ps(max_buffer),
     };
 }
-auto vectorise(const std::array<float, 3> min, const std::array<float, 3> max) noexcept
+inline auto vectorise(const std::array<float, 3> min, const std::array<float, 3> max) noexcept
 {
-    float min_buffer[4] = { min[0], min[1], min[2], 0.0f };
-    float max_buffer[4] = { max[0], max[1], max[2], 0.0f };
+    alignas(16) float min_buffer[4] = { min[0], min[1], min[2], 0.0f };
+    alignas(16) float max_buffer[4] = { max[0], max[1], max[2], 0.0f };
     return aabb {
-        .min = _mm_loadu_ps(min_buffer),
-        .max = _mm_loadu_ps(max_buffer),
+        .min = _mm_load_ps(min_buffer),
+        .max = _mm_load_ps(max_buffer),
     };
 }
-auto vectorise(const std::array<float, 3> min, const std::array<float, 3> max, uint64_t data) noexcept
+inline auto vectorise(const std::array<float, 3> min, const std::array<float, 3> max, uint64_t data) noexcept
 {
     const auto data_lower_32 = std::bit_cast<float>(static_cast<uint32_t>(data & 0xFFFFFFFF));
     const auto data_upper_32 = std::bit_cast<float>(static_cast<uint32_t>((data >> 32) & 0xFFFFFFFF));
 
-    float min_buffer[4] = { min[0], min[1], min[2], data_lower_32 };
-    float max_buffer[4] = { max[0], max[1], max[2], data_upper_32 };
+    alignas(16) float min_buffer[4] = { min[0], min[1], min[2], data_lower_32 };
+    alignas(16) float max_buffer[4] = { max[0], max[1], max[2], data_upper_32 };
 
     return aabb {
-        .min = _mm_loadu_ps(min_buffer),
-        .max = _mm_loadu_ps(max_buffer),
+        .min = _mm_load_ps(min_buffer),
+        .max = _mm_load_ps(max_buffer),
     };
 }
 
-auto devectorise(const aabb& a) noexcept
+inline auto devectorise(const aabb& a) noexcept
 {
-    float min_buffer[4];
-    float max_buffer[4];
+    alignas(16) float min_buffer[4];
+    alignas(16) float max_buffer[4];
 
     _mm_store_ps(min_buffer, a.min);
     _mm_store_ps(max_buffer, a.max);
@@ -79,7 +246,7 @@ auto devectorise(const aabb& a) noexcept
     };
 }
 
-auto does_intersect(const details::aabb& lhs, const details::aabb& rhs) noexcept
+inline auto does_intersect(const details::aabb& lhs, const details::aabb& rhs) noexcept
 {
     auto lhs_greater = _mm_cmple_ps(lhs.min, rhs.max);
     auto rhs_greater = _mm_cmple_ps(rhs.min, lhs.max);
@@ -87,8 +254,7 @@ auto does_intersect(const details::aabb& lhs, const details::aabb& rhs) noexcept
     auto mask = _mm_movemask_ps(is_within);
     return (mask & 0b0111) == 0b0111;
 }
-
-auto does_intersect(const details::aabb& lhs, const __m128& rhs) noexcept
+inline auto does_intersect(const details::aabb& lhs, const __m128& rhs) noexcept
 {
     auto lhs_greater = _mm_cmple_ps(lhs.min, rhs);
     auto rhs_greater = _mm_cmple_ps(rhs, lhs.max);
@@ -97,7 +263,7 @@ auto does_intersect(const details::aabb& lhs, const __m128& rhs) noexcept
     return (mask & 0b0111) == 0b0111;
 }
 
-auto has_equal_minmax(const details::aabb& lhs, const details::aabb& rhs) noexcept
+inline auto has_equal_minmax(const details::aabb& lhs, const details::aabb& rhs) noexcept
 {
     auto min_eq = _mm_cmplt_ps(lhs.min, rhs.max);
     auto max_eq = _mm_cmplt_ps(rhs.min, lhs.max);
@@ -105,9 +271,7 @@ auto has_equal_minmax(const details::aabb& lhs, const details::aabb& rhs) noexce
     auto mask = _mm_movemask_ps(both_eq);
     return (mask & 0b0111) == 0b0111;
 }
-
-auto has_equal_minmax_data(const details::aabb& lhs,
-    const details::aabb& rhs) noexcept
+inline auto has_equal_minmax_data(const details::aabb& lhs, const details::aabb& rhs) noexcept
 {
     auto min_eq = _mm_cmplt_ps(lhs.min, rhs.max);
     auto max_eq = _mm_cmplt_ps(rhs.min, lhs.max);
@@ -116,13 +280,13 @@ auto has_equal_minmax_data(const details::aabb& lhs,
     return mask == 0b1111;
 }
 
-auto calc_middle(const details::aabb& a) noexcept
+inline auto calc_middle(const details::aabb& a) noexcept
 {
     const auto diff_halved = _mm_div_ps(_mm_sub_ps(a.max, a.min), _mm_set_ps1(2.0f));
     return _mm_add_ps(a.min, diff_halved);
 }
 
-auto calc_bounding_volume_mean(const details::aabb* aabb_begin, uint32_t aabb_sz)
+inline auto calc_bounding_volume_mean(const details::aabb* aabb_begin, uint32_t aabb_sz)
 {
     const auto aabb_end = aabb_begin + aabb_sz;
 
@@ -139,9 +303,7 @@ auto calc_bounding_volume_mean(const details::aabb* aabb_begin, uint32_t aabb_sz
 
     return std::tuple { bounding_volume, mean };
 }
-
-auto calc_bounding_volume_mean_variance(const details::aabb* aabb_begin,
-    uint32_t aabb_sz)
+inline auto calc_bounding_volume_mean_variance(const details::aabb* aabb_begin, uint32_t aabb_sz)
 {
     const auto aabb_end = aabb_begin + aabb_sz;
     // calc bounding volume and mean
@@ -166,7 +328,7 @@ auto calc_bounding_volume_mean_variance(const details::aabb* aabb_begin,
     return std::tuple { bounding_volume, mean, variance };
 }
 
-auto branchless_minmidmax_indices(const float* vec3) noexcept
+inline auto branchless_minmidmax_indices(const float* vec3) noexcept
 {
     const unsigned int a = static_cast<unsigned int>(vec3[0] > vec3[1]);
     const unsigned int b = static_cast<unsigned int>(vec3[1] > vec3[2]) << 1;
@@ -188,8 +350,7 @@ auto branchless_minmidmax_indices(const float* vec3) noexcept
     return lookup[index];
 }
 
-auto replace_value_at_index(const __m128& dest, const __m128& src,
-    const size_t index) noexcept
+inline auto replace_value_at_index(const __m128& dest, const __m128& src, const size_t index) noexcept
 {
     auto result = dest;
     auto src_data = reinterpret_cast<const float*>(&src);
@@ -198,7 +359,7 @@ auto replace_value_at_index(const __m128& dest, const __m128& src,
     return result;
 }
 
-auto split(details::aabb* aabb_begin, uint32_t aabb_sz) noexcept
+inline auto split(details::aabb* aabb_begin, uint32_t aabb_sz) noexcept
 {
     // 2n operation
 #if USE_VARIANCE
@@ -231,7 +392,7 @@ auto split(details::aabb* aabb_begin, uint32_t aabb_sz) noexcept
     return std::tuple { bv, aabb_mid };
 }
 
-} // namespace bvh::simd
+} // namespace bvh128::details
 
 namespace bvh128 {
 
@@ -272,7 +433,7 @@ class tree {
     {
     }
 
-    auto expand(node& node, struct node* nodes)
+    inline auto expand(node& node, struct node* nodes)
     {
         if (node.s.u.aabbs_sz == 1) {
             node.aabb = *node.s.u.aabbs_begin;
@@ -360,4 +521,4 @@ public:
         }
     }
 };
-} // namespace bvh
+} // namespace bvh128
