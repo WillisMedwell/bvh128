@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cstdint>
 #include <memory>
+#include <numeric>
+#include <span>
 #include <vector>
 #include <xmmintrin.h>
 
@@ -24,13 +27,14 @@ class alignas(16) aabb128 {
         __m128 max;
     } _m;
 
-    explicit aabb128(M&& m);
+    explicit aabb128(M&& m) noexcept;
+    explicit aabb128(__m128&& min, __m128&& max) noexcept;
 
 public:
-    aabb128() = default;
+    aabb128() noexcept = default;
 
-    static aabb128 construct(const aabb other) noexcept;
-    static aabb128 construct(const std::array<float, 3>& min, const std::array<float, 3>& max, uint64_t data) noexcept;
+    static aabb128 construct(const aabb& other) noexcept;
+    // static aabb128 construct(const std::array<float, 3>& min, const std::array<float, 3>& max, uint64_t data) noexcept;
 
     [[nodiscard]] aabb deconstruct() const noexcept;
 
@@ -42,12 +46,19 @@ public:
     [[nodiscard]] bool is_equal_region(const aabb128& other) const noexcept;
     [[nodiscard]] bool is_equal_region_and_data(const aabb128& other) const noexcept;
 
+    static aabb128 calc_bounding_volume(const aabb128& lhs, const aabb128& rhs) noexcept;
+
     [[nodiscard]] __m128 calc_middle() const noexcept;
 };
 
-template <typename AllocatorU32 = std::allocator<uint32_t>>
-class tree {
+template <typename allocator>
+class tree;
 
+template <typename allocator>
+tree<allocator> construct_tree(std::span<const aabb> aabbs, allocator alloc = allocator());
+
+template <typename allocator = std::allocator<std::byte>>
+class tree {
     enum class node_variant : uint32_t {
         unexpanded,
         branch,
@@ -59,59 +70,99 @@ class tree {
         uint32_t aabbs_sz;
         node_variant node_type;
     };
-
     struct M {
-        std::unique_ptr<uint32_t[]> iter_buffer;
-        std::unique_ptr<aabb128[]> aabb128s;
-        std::unique_ptr<node[]> nodes;
+        allocator alloc;
+        std::byte* data;
+        size_t data_sz;
+        std::span<node> nodes;
+        std::span<aabb128> aabbs;
+        std::span<uint32_t> iteration_indices_buffer;
     } _m;
 
-    explicit tree(M&& m);
+    tree() = delete;
+    explicit tree(M&& m) noexcept;
 
 public:
-    tree() = default;
-
-    [[nodiscard]] static tree construct(const std::vector<aabb>& aabbs);
-
+    friend tree<allocator> construct_tree<>(std::span<const aabb> aabbs, allocator alloc); // Friend declaration
+    
     template <typename Pred>
     void for_each_intersection(aabb aabb, Pred pred) const noexcept;
+
+    ~tree() noexcept;
 };
 
-template <typename AllocatorU32>
-tree::tree(M&& m)
-    : _m(std::move(m))
+template <typename allocator = std::allocator<std::byte>>
+tree<allocator> construct_tree(std::span<const aabb> aabbs, allocator alloc)
 {
-}
+    static_assert(std::is_same_v<decltype(alloc.allocate(1)), std::byte*>);
 
-tree tree::construct(const std::vector<aabb>& aabbs)
-{
-    const size_t max_nodes = aabbs.size() * 2 - 1;
+    const size_t aabbs_sz = aabbs.size();
+    const size_t nodes_sz = aabbs.size() * 2 - 1;
+    const size_t buffer_sz = nodes_sz;
 
-    auto iter = std::make_unique_for_overwrite<uint32_t[]>(max_nodes);
+    const size_t aabbs_sz_bytes = aabbs_sz * sizeof(aabb128) + alignof(aabb128);
+    const size_t nodes_sz_bytes = nodes_sz * sizeof(typename tree<allocator>::node) + alignof(typename tree<allocator>::node);
+    const size_t buffer_sz_bytes = buffer_sz * sizeof(uint32_t) + alignof(uint32_t);
 
-    return tree(M {
-        .index_buffer = std::make_unique_for_overwrite<uint32_t[]>(max_nodes),
-        .aabb128s = aabb128s,
+    const size_t data_sz = aabbs_sz_bytes + nodes_sz_bytes + buffer_sz_bytes;
+    std::byte* data = alloc.allocate(aabbs_sz_bytes + nodes_sz_bytes + buffer_sz_bytes);
+    std::byte* data_offset = data;
+
+    auto span_w_proper_alignment = [&data_offset]<typename T>(size_t n) {
+        data_offset += (alignof(T) - ((reinterpret_cast<std::uintptr_t>(data_offset) % alignof(T)))) % alignof(T);
+        T* begin = reinterpret_cast<T*>(data_offset);
+        data_offset += n * sizeof(T);
+        return std::span<T>(begin, n);
+    };
+    auto nodes = span_w_proper_alignment.template operator()<typename tree<allocator>::node>(nodes_sz);
+    auto aabbs128 = span_w_proper_alignment.template operator()<aabb128>(aabbs_sz);
+    auto buffer = span_w_proper_alignment.template operator()<uint32_t>(buffer_sz);
+
+    std::transform(aabbs.begin(), aabbs.end(), aabbs128.begin(), &aabb128::construct);
+
+    nodes[0] = typename tree<allocator>::node {
+        std::reduce(aabbs128.begin(), aabbs128.end(), aabbs128.front(), &aabb128::calc_bounding_volume),
+        aabbs128.data(),
+        static_cast<uint32_t>(aabbs_sz),
+        tree<allocator>::node_variant::unexpanded
+    };
+
+    return tree<allocator>(typename tree<allocator>::M {
+        .alloc = std::move(alloc),
+        .data = data,
+        .data_sz = data_sz,
         .nodes = nodes,
+        .aabbs = aabbs128,
+        .iteration_indices_buffer = buffer,
     });
 }
 
-aabb128::aabb128(M&& m)
+template <typename allocator>
+tree<allocator>::tree(M&& m) noexcept
     : _m(std::move(m))
 {
 }
-
-aabb128 aabb128::construct(const aabb other) noexcept
+template <typename allocator>
+tree<allocator>::~tree() noexcept
 {
-    return construct(other.min, other.max, other.data);
+    _m.alloc.deallocate(_m.data, _m.data_sz);
 }
-aabb128 aabb128::construct(const std::array<float, 3>& min, const std::array<float, 3>& max, uint64_t data) noexcept
-{
-    const uint32_t data_lower_32 = static_cast<uint32_t>(data & 0xFFFFFFFF);
-    const uint32_t data_upper_32 = static_cast<uint32_t>((data >> 32) & 0xFFFFFFFF);
 
-    alignas(16) auto min_buffer = std::to_array({ min[0], min[1], min[2], std::bit_cast<float>(data_lower_32) });
-    alignas(16) auto max_buffer = std::to_array({ max[0], max[1], max[2], std::bit_cast<float>(data_upper_32) });
+aabb128::aabb128(M&& m) noexcept
+    : _m(std::move(m))
+{
+}
+aabb128::aabb128(__m128&& min, __m128&& max) noexcept
+    : _m(M { .min = min, .max = max })
+{
+}
+aabb128 aabb128::construct(const aabb& other) noexcept
+{
+    const uint32_t data_lower_32 = static_cast<uint32_t>(other.data & 0xFFFFFFFF);
+    const uint32_t data_upper_32 = static_cast<uint32_t>((other.data >> 32) & 0xFFFFFFFF);
+
+    alignas(16) auto min_buffer = std::to_array({ other.min[0], other.min[1], other.min[2], std::bit_cast<float>(data_lower_32) });
+    alignas(16) auto max_buffer = std::to_array({ other.max[0], other.max[1], other.max[2], std::bit_cast<float>(data_upper_32) });
 
     return aabb128(M {
         .min = _mm_load_ps(min_buffer.data()),
@@ -168,6 +219,13 @@ bool aabb128::is_equal_region_and_data(const aabb128& other) const noexcept
     return mask == 0b1111;
 }
 
+aabb128 aabb128::calc_bounding_volume(const aabb128& lhs, const aabb128& rhs) noexcept
+{
+    return aabb128 {
+        _mm_min_ps(lhs._m.min, rhs._m.min),
+        _mm_max_ps(lhs._m.max, rhs._m.max),
+    };
+}
 __m128 aabb128::calc_middle() const noexcept
 {
     const auto difference_halved = _mm_div_ps(_mm_sub_ps(_m.max, _m.min), _mm_set_ps1(2.0f));

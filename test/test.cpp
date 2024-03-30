@@ -100,3 +100,21 @@ TEST_CASE("Create a basic tree", "[basic]")
         REQUIRE(count_linear_search == count_tree_search);
     }
 }
+
+TEST_CASE("Construct Basic Tree", "[basic]")
+{
+    std::vector<bvh12::aabb> aabbs;
+
+    aabbs.emplace_back();
+    aabbs.emplace_back();
+    aabbs.emplace_back();
+    aabbs.emplace_back();
+    aabbs.emplace_back();
+    aabbs.emplace_back();
+
+    
+    auto tree = bvh12::construct_tree({aabbs.data(), aabbs.size()});
+
+    
+
+}
